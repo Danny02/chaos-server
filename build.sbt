@@ -14,3 +14,6 @@ libraryDependencies ++= Seq(
   "com.github.pureconfig" %% "pureconfig-core" % "0.17.1",
   "ch.qos.logback" % "logback-classic" % "1.2.11" % Runtime
 )
+
+Docker / packageName := sys.env.getOrElse("IMAGE_NAME", name.value)
+dockerRepository := sys.env.get("REGISTRY")
