@@ -17,3 +17,5 @@ libraryDependencies ++= Seq(
 
 Docker / packageName := sys.env.getOrElse("IMAGE_NAME", name.value)
 dockerRepository := sys.env.get("REGISTRY")
+dockerAlias := DockerAlias(dockerRepository.value, None, (Docker/packageName).value, Some(version.value.toLowerCase))
+dockerExposedPorts ++= Seq(8080)
