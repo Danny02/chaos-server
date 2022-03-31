@@ -15,7 +15,6 @@ libraryDependencies ++= Seq(
   "ch.qos.logback" % "logback-classic" % "1.2.11" % Runtime
 )
 
-Docker / packageName := sys.env.getOrElse("IMAGE_NAME", name.value)
 dockerRepository := sys.env.get("REGISTRY")
-dockerAlias := DockerAlias(dockerRepository.value, None, (Docker/packageName).value, Some(version.value.toLowerCase))
+dockerUsername := sys.env.get("USER").map(_.toLowerCase)
 dockerExposedPorts ++= Seq(8080)
