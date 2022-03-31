@@ -16,5 +16,5 @@ libraryDependencies ++= Seq(
 )
 
 dockerRepository := sys.env.get("REGISTRY")
-dockerUsername := sys.env.get("USER").map(_.toLowerCase)
+dockerUsername := sys.env.get("REGISTRY_USER").map(_.toLowerCase)
 dockerExposedPorts ++= Seq(8080)

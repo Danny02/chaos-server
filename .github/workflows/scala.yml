@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  USER: ${{ github.actor }}
+  REGISTRY_USER: ${{ github.actor }}
 
 permissions:
   contents: read
@@ -36,4 +36,4 @@ jobs:
         distribution: 'temurin'
         
     - name: build publish
-      run: sbt Docker / publish
+      run: sbt Docker/publish
