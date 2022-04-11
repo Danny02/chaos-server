@@ -1,9 +1,11 @@
 package dev.nullzwo.chaos
 
+import cats._
 import cats.data.OptionT
 import cats.effect.*
-import cats.effect.kernel.Temporal
-import cats.effect.syntax.all.*
+import cats.effect.instances.all._
+import cats.instances.all._
+import cats.implicits._
 import cats.syntax.all.*
 import com.comcast.ip4s.*
 import io.prometheus.client.CollectorRegistry
@@ -55,29 +57,34 @@ object App extends IOApp {
               delay <- rnd.nextDouble
               d = delay * delay * delay
               msg <- callService("Hans").delayBy(
-                //if (delay > (1 - failureRate)) 99.minutes else (d * maxDelay).millisecond
+                // if (delay > (1 - failureRate)) 99.minutes else (d * maxDelay).millisecond
                 (d * maxDelay).millisecond
               )
               r <- Ok(msg)
             } yield r
           }
 
-          def throttler[F[_]: Functor](reqPerSecond: cats.effect.Ref[F, Long])(http: Http[F, IO]): F[Http[F, IO]] = {
-            val refillFrequency =  reqPerSecond.map( 1.second / _)
-            val createBucket = refLocal(requestsPerSecond, refillFrequency)
+          def throttler[F[_]: Temporal, G[_]](reqPerSecond: F[Int])(http: Http[F, G]): F[Http[F, G]] = {
+            val refillFrequency = reqPerSecond.map(1.second / _.toLong)
+            val createBucket    = refLocal(reqPerSecond, refillFrequency)
             createBucket.map(bucket => apply(bucket, defaultResponse[G] _)(http))
           }
 
+          val reqPerSecond = IO.monotonic.map{d =>
+            val interval = d.toSeconds.toInt / 15 % 3
+            requestsPerSecond - (requestsPerSecond * (interval / 3.0)).toInt
+          }
+
           Resource.eval(
-          (for {
-            api <- throttler[[x] =>> OptionT[IO, x]](routes)
-          } yield
-            Router(
-              "/" -> metricsSvc.routes,
-              "/api" ->Metrics[IO](metrics)(api)
-            ).orNotFound).value.map(_.get))
+            (for {
+              api <- throttler[[x] =>> OptionT[IO, x], IO](OptionT.liftF(reqPerSecond))(routes)
+            } yield Router(
+              "/"    -> metricsSvc.routes,
+              "/api" -> Metrics[IO](metrics)(api)
+            ).orNotFound).value.map(_.get)
+          )
         }
-      }.use{httpApp =>
+      }.use { httpApp =>
         EmberServerBuilder
           .default[IO]
           .withHost(ipv4"0.0.0.0")
@@ -89,39 +96,35 @@ object App extends IOApp {
     } yield ExitCode.Success
 }
 
-
-def refLocal[F[_]: cats.Monad](capacity: Int, refillEveryRef: Ref[F, FiniteDuration])(implicit
-                                                            F: Temporal[F]
-): F[TokenBucket[F]] = {
+def refLocal[F[_]](capacityF: F[Int], refillEveryF: F[FiniteDuration])(using F: Temporal[F]): F[TokenBucket[F]] = {
   def getTime = F.monotonic.map(_.toNanos)
-  val bucket = getTime.flatMap(time => F.ref((capacity.toDouble, time)))
+  val bucket = for {
+    time     <- getTime
+    capacity <- capacityF
+    ref <- F.ref((capacity.toDouble, time))
+  } yield ref
 
   bucket.map { (counter: Ref[F, (Double, Long)]) =>
     new TokenBucket[F] {
       override def takeToken: F[TokenAvailability] = {
         val attemptUpdate = for {
-          t <- counter.access
-          refillEvery <- refillEveryRef.get
-        } yield {
-           val ((previousTokens, previousTime), setter) = t
-            getTime.flatMap { currentTime =>
-              val timeDifference = currentTime - previousTime
-              val tokensToAdd = timeDifference.toDouble / refillEvery.toNanos.toDouble
-              val newTokenTotal = Math.min(previousTokens + tokensToAdd, capacity.toDouble)
+          t           <- counter.access
+          refillEvery <- refillEveryF
+          capacity    <- capacityF
+          attemptSet <- getTime.flatMap { currentTime =>
+            val ((previousTokens, previousTime), setter) = t
+            val timeDifference                           = currentTime - previousTime
+            val tokensToAdd                              = timeDifference.toDouble / refillEvery.toNanos.toDouble
+            val newTokenTotal                            = Math.min(previousTokens + tokensToAdd, capacity.toDouble)
 
-              val attemptSet: F[Option[TokenAvailability]] =
-                if (newTokenTotal >= 1)
-                  setter((newTokenTotal - 1, currentTime))
-                    .map(_.guard[Option].as(TokenAvailable))
-                else {
-                  val timeToNextToken = refillEvery.toNanos - timeDifference
-                  val successResponse = TokenUnavailable(timeToNextToken.nanos.some)
-                  setter((newTokenTotal, currentTime)).map(_.guard[Option].as(successResponse))
-                }
-
-              attemptSet
+            if (newTokenTotal >= 1) setter((newTokenTotal - 1, currentTime)).map(_.guard[Option].as(TokenAvailable))
+            else {
+              val timeToNextToken = refillEvery.toNanos - timeDifference
+              val successResponse = TokenUnavailable(timeToNextToken.nanos.some)
+              setter((newTokenTotal, currentTime)).map(_.guard[Option].as(successResponse))
             }
-        }
+          }
+        } yield attemptSet
 
         def loop: F[TokenAvailability] =
           attemptUpdate.flatMap { attempt =>
